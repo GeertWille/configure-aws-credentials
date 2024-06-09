@@ -13,6 +13,19 @@ const ACTION_ENVIRONMENT_VARIABLES = {
   AWS_REGION: FAKE_REGION,
 };
 
+// eslint-disable-next-line @typescript-eslint/no-unsafe-return
+jest.mock('fs', () => ({
+  ...jest.requireActual('fs'),
+  existsSync: jest.fn(() => true),
+  readFileSync: jest.fn(() => 'testpayload'),
+  rmSync: jest.fn(),
+
+  promises: {
+    readFile: jest.fn(async () => 'testpayload'),
+    writeFile: jest.fn(async () => 'testpayload'),
+  },
+}));
+
 describe('Configure AWS Credentials', () => {
   const OLD_ENV = process.env;
 

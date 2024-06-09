@@ -1,4 +1,3 @@
-
 name: '"Configure AWS Credentials" Action for GitHub Actions'
 description: Configures AWS credentials for use in subsequent steps in a GitHub Action workflow
 runs:
@@ -24,6 +23,9 @@ inputs:
   aws-session-token:
     description: AWS Session Token.
     required: false
+  aws-profile:
+    description: 'AWS Profile'
+    required: false
   web-identity-token-file:
     description: Use the web identity token file from the provided file system path in order to assume an IAM role using a web identity, e.g. from within an Amazon EKS worker node.
     required: false
@@ -47,7 +49,7 @@ inputs:
     description: The external ID of the role to assume.
     required: false
   role-session-name:
-    description: "Role session name (default: GitHubActions)"
+    description: 'Role session name (default: GitHubActions)'
     required: false
   role-skip-session-tagging:
     description: Skip session tagging during role assumption

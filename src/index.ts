@@ -1,13 +1,14 @@
 import * as core from '@actions/core';
-import type { AssumeRoleCommandOutput } from '@aws-sdk/client-sts';
+import { type AssumeRoleCommandOutput } from '@aws-sdk/client-sts';
 import { assumeRole } from './assumeRole';
 import { CredentialsClient } from './CredentialsClient';
 import {
   errorMessage,
-  retryAndBackoff,
-  exportRegion,
-  exportCredentials,
   exportAccountId,
+  exportCredentials,
+  exportRegion,
+  retryAndBackoff,
+  saveCredentialsToConfig,
   unsetCredentials,
   verifyKeys,
 } from './helpers';
@@ -23,6 +24,7 @@ export async function run() {
     const SecretAccessKey = core.getInput('aws-secret-access-key', { required: false });
     const sessionTokenInput = core.getInput('aws-session-token', { required: false });
     const SessionToken = sessionTokenInput === '' ? undefined : sessionTokenInput;
+    const profileName = core.getInput('aws-profile', { required: false });
     const region = core.getInput('aws-region', { required: true });
     const roleToAssume = core.getInput('role-to-assume', { required: false });
     const audience = core.getInput('audience', { required: false });
@@ -101,9 +103,9 @@ export async function run() {
     exportRegion(region);
 
     // Instantiate credentials client
-    const credentialsClient = new CredentialsClient({ region, proxyServer });
+    const credentialsClient = new CredentialsClient({ region, proxyServer, profileName });
     let sourceAccountId: string;
-    let webIdentityToken: string;
+    let webIdentityToken: string | undefined;
 
     // If OIDC is being used, generate token
     // Else, export credentials provided as input
@@ -123,11 +125,27 @@ export async function run() {
       if (!SecretAccessKey) {
         throw new Error("'aws-secret-access-key' must be provided if 'aws-access-key-id' is provided");
       }
+
       // The STS client for calling AssumeRole pulls creds from the environment.
       // Plus, in the assume role case, if the AssumeRole call fails, we want
       // the source credentials to already be masked as secrets
       // in any error messages.
       exportCredentials({ AccessKeyId, SecretAccessKey, SessionToken });
+
+      if (profileName) {
+        core.debug(`Saving credentials to config for profile: ${profileName}`);
+
+        await saveCredentialsToConfig({
+          profileName,
+          creds: {
+            AccessKeyId,
+            SecretAccessKey,
+            SessionToken,
+            roleArn: roleToAssume,
+            roleSessionName: roleSessionName,
+          },
+        });
+      }
     } else if (!webIdentityTokenFile && !roleChaining) {
       // Proceed only if credentials can be picked up
       await credentialsClient.validateCredentials();
@@ -168,8 +186,24 @@ export async function run() {
         );
         // eslint-disable-next-line no-unmodified-loop-condition
       } while (specialCharacterWorkaround && !verifyKeys(roleCredentials.Credentials));
-      core.info(`Authenticated as assumedRoleId ${roleCredentials.AssumedRoleUser!.AssumedRoleId!}`);
+
       exportCredentials(roleCredentials.Credentials, outputCredentials);
+
+      if (profileName) {
+        core.debug(`Saving credentials to config for profile: ${profileName}, with roleArn: ${roleToAssume}`);
+
+        await saveCredentialsToConfig({
+          profileName,
+          creds: {
+            ...roleCredentials.Credentials,
+            roleArn: roleToAssume,
+            roleSessionName,
+            webIdentityToken,
+            webIdentityTokenFile,
+          },
+        });
+      }
+
       // We need to validate the credentials in 2 of our use-cases
       // First: self-hosted runners. If the GITHUB_ACTIONS environment variable
       //  is set to `true` then we are NOT in a self-hosted runner.

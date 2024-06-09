@@ -1,3 +1,6 @@
+const fromEnvMock = jest.fn();
+
+import fs from 'fs';
 import * as core from '@actions/core';
 import {
   AssumeRoleCommand,
@@ -7,7 +10,8 @@ import {
 } from '@aws-sdk/client-sts';
 import { CredentialsProviderError } from '@smithy/property-provider';
 import { mockClient } from 'aws-sdk-client-mock';
-import { withsleep, reset } from '../src/helpers';
+import ini from 'ini';
+import { reset, withsleep } from '../src/helpers';
 import { run } from '../src/index';
 
 // #region
@@ -21,6 +25,9 @@ const FAKE_ASSUMED_ROLE_ID = 'AROAFAKEASSUMEDROLEID';
 const FAKE_REGION = 'fake-region-1';
 const FAKE_ACCOUNT_ID = '123456789012';
 const FAKE_ROLE_ACCOUNT_ID = '111111111111';
+const FAKE_SHARED_CREDENTIALS_FILE = `${process.env['HOME']}/.aws/credentials`;
+const FAKE_CONFIG_FILE = `${process.env['HOME']}/.aws/config`;
+const FAKE_PROFILE = 'profile1';
 const ROLE_NAME = 'MY-ROLE';
 const ROLE_ARN = 'arn:aws:iam::111111111111:role/MY-ROLE';
 const MANAGED_SESSION_POLICY_INPUT = [
@@ -46,6 +53,7 @@ const DEFAULT_INPUTS = {
   ...CREDS_INPUTS,
   'aws-session-token': FAKE_SESSION_TOKEN,
   'aws-region': FAKE_REGION,
+  'aws-profile': FAKE_PROFILE,
 };
 const ASSUME_ROLE_INPUTS = { ...CREDS_INPUTS, 'role-to-assume': ROLE_ARN, 'aws-region': FAKE_REGION };
 // #endregion
@@ -68,9 +76,9 @@ jest.mock('fs', () => ({
   ...jest.requireActual('fs'),
   existsSync: jest.fn(() => true),
   readFileSync: jest.fn(() => 'testpayload'),
+  rmSync: jest.fn(),
+  writeFileSync: jest.fn(async () => 'testpayload'),
 }));
-
-const fromEnvMock = jest.fn();
 
 jest.mock('@aws-sdk/credential-provider-env', () => ({
   fromEnv: fromEnvMock,
@@ -145,7 +153,7 @@ describe('Configure AWS Credentials', () => {
     await run();
 
     expect(mockedSTS.commandCalls(AssumeRoleCommand)).toHaveLength(0);
-    expect(core.exportVariable).toHaveBeenCalledTimes(5);
+    expect(core.exportVariable).toHaveBeenCalledTimes(8);
     expect(core.setSecret).toHaveBeenCalledTimes(3);
     expect(core.exportVariable).toHaveBeenCalledWith('AWS_ACCESS_KEY_ID', FAKE_ACCESS_KEY_ID);
     expect(core.setSecret).toHaveBeenCalledWith(FAKE_ACCESS_KEY_ID);
@@ -155,6 +163,9 @@ describe('Configure AWS Credentials', () => {
     expect(core.setSecret).toHaveBeenCalledWith(FAKE_SESSION_TOKEN);
     expect(core.exportVariable).toHaveBeenCalledWith('AWS_DEFAULT_REGION', FAKE_REGION);
     expect(core.exportVariable).toHaveBeenCalledWith('AWS_REGION', FAKE_REGION);
+    expect(core.exportVariable).toHaveBeenCalledWith('AWS_PROFILE', FAKE_PROFILE);
+    expect(core.exportVariable).toHaveBeenCalledWith('AWS_SHARED_CREDENTIALS_FILE', FAKE_SHARED_CREDENTIALS_FILE);
+    expect(core.exportVariable).toHaveBeenCalledWith('AWS_CONFIG_FILE', FAKE_CONFIG_FILE);
     expect(core.setOutput).toHaveBeenCalledWith('aws-account-id', FAKE_ACCOUNT_ID);
   });
 
@@ -839,9 +850,12 @@ describe('Configure AWS Credentials', () => {
       .spyOn(core, 'getInput')
       .mockImplementation(mockGetInput({ ...ASSUME_ROLE_INPUTS, 'unset-current-credentials': 'true' }));
 
+    jest.spyOn(fs, 'rmSync').mockImplementation(() => undefined);
+
     await run();
 
-    expect(core.exportVariable).toHaveBeenCalledTimes(12);
+    expect(core.exportVariable).toHaveBeenCalledTimes(14);
+    expect(fs.rmSync).toHaveBeenCalledWith(`${process.env['HOME']}/.aws`, { force: true, recursive: true });
   });
 
   test('sets credentials as output if enabled', async () => {
@@ -852,5 +866,44 @@ describe('Configure AWS Credentials', () => {
     await run();
 
     expect(core.setOutput).toHaveBeenCalledTimes(4);
+  });
+
+  test('multi profile support', async () => {
+    jest.spyOn(core, 'getInput').mockImplementation(
+      mockGetInput({
+        ...DEFAULT_INPUTS,
+        'aws-profile': 'profile1',
+      })
+    );
+
+    /* eslint-disable camelcase */
+    let tempCredentialsContent = ini.stringify({
+      oldprofile: {
+        aws_access_key_id: FAKE_ACCESS_KEY_ID,
+        aws_secret_access_key: FAKE_SECRET_ACCESS_KEY,
+        aws_session_token: FAKE_SESSION_TOKEN,
+      },
+    });
+    /* eslint-enable camelcase */
+
+    jest.spyOn(fs, 'readFileSync').mockImplementation(() => tempCredentialsContent);
+    jest.spyOn(fs, 'writeFileSync').mockImplementation((_path, data) => {
+      tempCredentialsContent = data.toString();
+      return Promise.resolve();
+    });
+
+    await run();
+
+    const awsCredentialsFile = `${process.env['HOME']}/.aws/credentials`;
+    const credentialsContent = fs.readFileSync(awsCredentialsFile, 'utf-8');
+
+    const profiles = ini.parse(credentialsContent);
+    const profileExists = Object.keys(profiles).includes('profile1');
+    const oldProfileExists = Object.keys(profiles).includes('oldprofile');
+
+    expect(profileExists).toBe(true);
+    expect(oldProfileExists).toBe(true);
+
+    expect(core.exportVariable).toHaveBeenCalledWith('AWS_PROFILE', 'profile1');
   });
 });

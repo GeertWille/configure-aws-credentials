@@ -1,6 +1,8 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import * as core from '@actions/core';
 import type { Credentials } from '@aws-sdk/client-sts';
 import { GetCallerIdentityCommand } from '@aws-sdk/client-sts';
+import ini from 'ini';
 import type { CredentialsClient } from './CredentialsClient';
 
 const MAX_TAG_VALUE_LENGTH = 256;
@@ -10,6 +12,8 @@ const SPECIAL_CHARS_REGEX = /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]+/;
 // Configure the AWS CLI and AWS SDKs using environment variables and set them as secrets.
 // Setting the credentials as secrets masks them in Github Actions logs
 export function exportCredentials(creds?: Partial<Credentials>, outputCredentials?: boolean) {
+  core.info('Exporting credentials');
+
   if (creds?.AccessKeyId) {
     core.setSecret(creds.AccessKeyId);
     core.exportVariable('AWS_ACCESS_KEY_ID', creds.AccessKeyId);
@@ -41,12 +45,124 @@ export function exportCredentials(creds?: Partial<Credentials>, outputCredential
   }
 }
 
+export async function saveCredentialsToConfig({
+  profileName,
+  creds,
+}: {
+  profileName?: string;
+  creds?: Partial<Credentials> & {
+    region?: string;
+    roleArn?: string;
+    roleSessionName?: string;
+    externalId?: string;
+    webIdentityToken?: string;
+    webIdentityTokenFile?: string;
+  };
+}) {
+  if (!profileName || !creds) {
+    return;
+  }
+
+  const awsConfigFolder = `${process.env['HOME']}/.aws`;
+  const awsCredentialsFile = `${awsConfigFolder}/credentials`;
+  const webIdentityTokenFile = `${awsConfigFolder}/web-identity-token`;
+  const awsConfigFile = `${awsConfigFolder}/config`;
+
+  let credentials: Record<
+    string,
+    { aws_access_key_id: string; aws_secret_access_key: string; aws_session_token: string; region?: string }
+  > = {};
+  let config: Record<
+    string,
+    {
+      region?: string;
+      role_arn: string;
+      role_session_name: string;
+      external_id?: string;
+      source_profile?: string;
+      web_identity_token_file?: string;
+    }
+  > = {};
+
+  if (!existsSync(awsConfigFolder)) {
+    mkdirSync(awsConfigFolder, { recursive: true });
+  }
+
+  if (creds.webIdentityToken) {
+    writeFileSync(webIdentityTokenFile, creds.webIdentityToken);
+  }
+
+  if (existsSync(awsCredentialsFile)) {
+    credentials = ini.parse(readFileSync(awsCredentialsFile, 'utf-8'));
+  }
+
+  if (existsSync(awsConfigFile)) {
+    config = ini.parse(readFileSync(awsConfigFile, 'utf-8'));
+  }
+
+  // We need to validate we have all the required credentials
+  if (!creds.AccessKeyId || !creds.SecretAccessKey || !creds.SessionToken) {
+    throw new Error("Can't export credentials to config, missing credentials");
+  }
+
+  /* eslint-disable camelcase */
+  credentials[profileName] = {
+    aws_access_key_id: creds.AccessKeyId,
+    aws_secret_access_key: creds.SecretAccessKey,
+    aws_session_token: creds.SessionToken,
+    region: creds.region,
+  };
+
+  if (creds.roleArn && creds.roleSessionName) {
+    config[`profile ${profileName}`] = {
+      region: creds.region,
+      role_arn: creds.roleArn,
+      role_session_name: creds.roleSessionName,
+      web_identity_token_file: webIdentityTokenFile,
+    };
+  }
+  /* eslint-enable camelcase */
+
+  // Clean up empty values
+  const cleanUpEmptyValues = (obj: Record<string, any>) => {
+    for (const profile of Object.values(obj)) {
+      for (const key in profile) {
+        if (profile[key] === undefined || profile[key] === '') {
+          delete profile[key];
+        }
+      }
+    }
+  };
+
+  cleanUpEmptyValues(credentials);
+  cleanUpEmptyValues(config);
+
+  writeFileSync(awsConfigFile, ini.stringify(config));
+  writeFileSync(awsCredentialsFile, ini.stringify(credentials));
+
+  // Set the AWS_PROFILE environment variable
+  core.exportVariable('AWS_PROFILE', profileName);
+  core.exportVariable('AWS_SHARED_CREDENTIALS_FILE', awsCredentialsFile);
+  core.exportVariable('AWS_CONFIG_FILE', awsConfigFile);
+
+  core.info(`Exported AWS_PROFILE: ${profileName}`);
+  core.info(`Exported AWS_SHARED_CREDENTIALS_FILE: ${awsCredentialsFile}`);
+  core.info(`Exported AWS_CONFIG_FILE: ${awsConfigFile}`);
+}
+
 export function unsetCredentials() {
+  core.info('Unsetting AWS credentials');
+
   core.exportVariable('AWS_ACCESS_KEY_ID', '');
   core.exportVariable('AWS_SECRET_ACCESS_KEY', '');
   core.exportVariable('AWS_SESSION_TOKEN', '');
   core.exportVariable('AWS_REGION', '');
   core.exportVariable('AWS_DEFAULT_REGION', '');
+  core.exportVariable('AWS_PROFILE', '');
+  core.exportVariable('AWS_SHARED_CREDENTIALS_FILE', '');
+
+  // remove the .aws folder
+  rmSync(`${process.env['HOME']}/.aws`, { force: true, recursive: true });
 }
 
 export function exportRegion(region: string) {

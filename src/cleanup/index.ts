@@ -1,3 +1,5 @@
+import { rmSync } from 'fs';
+
 import * as core from '@actions/core';
 import { errorMessage } from '../helpers';
 
@@ -23,6 +25,8 @@ export function cleanup() {
     core.exportVariable('AWS_SESSION_TOKEN', '');
     core.exportVariable('AWS_DEFAULT_REGION', '');
     core.exportVariable('AWS_REGION', '');
+
+    rmSync(`${process.env['HOME']}/.aws`, { force: true, recursive: true });
   } catch (error) {
     core.setFailed(errorMessage(error));
   }
